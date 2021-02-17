@@ -1,7 +1,7 @@
 # Readers for labeled text formats
 
 import re
-
+import json
 from collections import OrderedDict
 
 
@@ -35,6 +35,19 @@ def parse_tsv_line(l):
     labels = labels.split()
     return text, labels
 
+def parse_json(i):
+    text = i["text"]
+    labels = i["labels"]
+    return text, labels
+
+def read_json(f, fn):
+    data = json.load(f)
+    for key in data:
+        try:
+            text, labels = parse_json(key)
+        except Exception as e:
+            raise ValueError(f'failed to parse {fn} key {key}: {e}: {key}')
+        yield text, labels
 
 def read_fasttext(f, fn, label_string='__label__'):
     for ln, l in enumerate(f, start=1):
@@ -59,6 +72,7 @@ def read_tsv(f, fn):
 READERS = OrderedDict([
     ('tsv', read_tsv),
     ('fasttext', read_fasttext),
+    ('json', read_json)
 ])
 
 
