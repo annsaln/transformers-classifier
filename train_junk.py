@@ -13,7 +13,7 @@ from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from tensorflow.keras import Model
-from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed
+from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed, Reshape
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy, AUC
@@ -129,8 +129,13 @@ def get_optimizer(num_train_examples, options):
     return optimizer
 
 
-def build_classifier(pretrained_model, num_labels, optimizer, options):
+def build_classifier(pretrained_model, num_labels, optimizer, options, MAX_LINES=500):
     seq_len = options.seq_len
+    # Document-level input
+    doc_input = Input(shape=(MAX_LINES,))
+
+    ## Transformer block
+    # Transformer inputs
     input_ids = Input(
         shape=(seq_len,), dtype='int32', name='input_ids')
     attention_mask = Input(
@@ -139,8 +144,17 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
 
     pretrained_outputs = pretrained_model(inputs)
     pooled_output = pretrained_outputs['last_hidden_state'][:,0,:] #CLS
+    #import pdb; pdb.set_trace()
+    pooled_output_ = Reshape((-1,768))(pooled_output)
+    ## End of transformer block
 
-
+    encoded_lines = TimeDistributed(pooled_output)(doc_input)
+    # encoded_lines shape (hopefully): [n_docs, n_lines, emb_dim]
+    lstm = LSTM(768)(encoded_lines, return_sequences=True)
+    output = TimeDistributed(Dense(2, activation='softmax'))(lstm)
+    loss = CategoricalCrossentropy()
+    F1Score(name='f1', num_classes=num_labels, average='micro')
+    """
     # TODO consider Dropout here
     if options.multiclass:
         output = Dense(num_labels, activation='softmax')(pooled_output)
@@ -156,6 +170,7 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
             #F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5),
             #AUC(name='auc', multi_label=True)
         ]
+    """
     #output = pretrained_outputs # test
     model = Model(
         inputs=inputs,
@@ -256,7 +271,7 @@ def make_tokenization_function(tokenizer, options):
 #        print(attention_mask)
         input_ids = np.pad(input_ids, ((0,lines-len(input_ids)), (0,0)), 'constant', constant_values=1)
         attention_mask = np.pad(attention_mask, ((0,lines-len(attention_mask)),(0,0)))
-        
+
 #        print('uusi')
 #        print(input_ids)
 #        print(attention_mask)
@@ -407,17 +422,17 @@ def main(argv):
     init_tf_memory()
     options = argparser().parse_args(argv[1:])
 
-    train_texts, train_labels = load_data(options.train, options, max_chars=25000)
+    train_texts, train_labels = load_data(options.train, options, max_chars=25000) # train_texts: list of docs, which are list of lines; train_labels same format
     dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
     if options.test is not None:
         test_texts, test_labels = load_data(options.test, options, max_chars=25000)
     num_train_examples = len(train_texts)
     num_lines = max([len(i) for i in train_texts])
-    label_encoder = MultiLabelBinarizer()
-    label_encoder.fit(train_labels)
+    label_encoder = MultiLabelBinarizer() # TODO: don't use multilabel
+    label_encoder.fit(train_labels) #
     train_Y = label_encoder.transform(train_labels)
-    train_Y = pad_sequences(train_Y, maxlen=512)
-    print(np.shape(train_Y))
+    train_Y = pad_sequences(train_Y, maxlen=512) # TODO: replace with cropping, apply to_categorical
+    print("train_Y shape", np.shape(train_Y))
     dev_Y = label_encoder.transform(dev_labels)
     dev_Y = pad_sequences(dev_Y, maxlen=512)
     if options.test is not None:
@@ -435,7 +450,7 @@ def main(argv):
 #    train_X = tokenize(train_texts, 512)
 #    print(np.shape(train_X))
 #    dev_X = tokenize(dev_texts)
-    train_X = {'input_ids': [], 'attention_mask': []
+    train_X = {'input_ids': [], 'attention_mask': [] # TODO: mode input_ids/attention_mask dict inside data structure
               # ,'token_type_ids': []
     }
     dev_X = {'input_ids': [], 'attention_mask': []
@@ -443,11 +458,28 @@ def main(argv):
     }
     input_ids = []
     attention_mask = []
-    for train in train_texts:
-        train_X['input_ids'].append(tokenize(train, num_lines)['input_ids'])
-      #  train_X['token_type_ids'].append(tokenize(train, num_lines)['token_type_ids'])
-        train_X['attention_mask'].append(tokenize(train, num_lines)['attention_mask'])
-    print(np.shape(train_X['input_ids']))
+    for train_doc in train_texts:
+        input_ids.append([])
+        attention_mask.append([])
+        MAX_LINES = 500
+        for i, line in enumerate(train_doc):
+            if i >= MAX_LINES:
+                break
+            input = tokenize(line, options.seq_len)
+            input_ids[-1].append(input['token_ids'])
+            attention_mask[-1].append(input['attention_mask'])
+
+        # Pad lines
+        for i in range(MAX_LINES-len(input_ids)):
+            input_ids[-1].append(input['token_ids']*0)
+            attention_mask[-1].append(input['attention_mask']*0)
+
+    train_X = {'input_ids': np.array(input_ids), 'attention_mask': np.array(attention_mask)}
+    #    train_X['input_ids'].append(
+    #['input_ids'])
+    #  train_X['token_type_ids'].append(tokenize(train, num_lines)['token_type_ids'])
+    #    train_X['attention_mask'].append(tokenize(train, num_lines)['attention_mask'])
+    print('input_ids shape', np.shape(train_X['input_ids']))
     for dev in dev_texts:
         dev_X['input_ids'].append(tokenize(dev, num_lines)['input_ids'])
      #   dev_X['token_type_ids'].append(tokenize(dev, num_lines)['token_type_ids'])
