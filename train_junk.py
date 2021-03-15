@@ -11,7 +11,8 @@ from scipy.sparse import lil_matrix
 
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 from sklearn.preprocessing import MultiLabelBinarizer
-
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelBinarizer
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed, Reshape
 from tensorflow.keras.optimizers import Adam
@@ -196,15 +197,16 @@ def load_data(fn, options, max_chars=None):
                 raise ValueError(f'missing label on line {ln} in {fn}: {l}')
             elif options.multiclass and len(text_labels) > 1:
                 raise ValueError(f'multiple labels on line {ln} in {fn}: {l}')
-#            texts.append(text[:max_chars])
-            texts.append(text[:512])
+            texts.append(text[:max_chars])
+#            texts.append(text[:512])
 #            print(text)
-            labels.append(text_labels[:512])
+            labels.append(text_labels[:max_chars])
             lengths.append(len(text))
 #    print(texts)
 #    texts = pad_sequences(texts)
 #    labels = pad_sequences(labels)
 #    print(texts[0])
+#    MAX_LEN = max(lengths)
     print(f'loaded {len(texts)} examples from {fn}', file=sys.stderr)
     return texts, labels
 
@@ -421,24 +423,52 @@ class EvalCallback(Callback):
 def main(argv):
     init_tf_memory()
     options = argparser().parse_args(argv[1:])
-
-    train_texts, train_labels = load_data(options.train, options, max_chars=25000) # train_texts: list of docs, which are list of lines; train_labels same format
+    MAX_LINES = 500
+    train_texts, train_labels = load_data(options.train, options, max_chars=25000) 
+    # train_texts: list of docs, which are list of lines; train_labels same format
+    print("TEXTS",np.shape(train_texts))
+    print("LABELS",np.shape(train_labels))
     dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
     if options.test is not None:
         test_texts, test_labels = load_data(options.test, options, max_chars=25000)
     num_train_examples = len(train_texts)
-    num_lines = max([len(i) for i in train_texts])
-    label_encoder = MultiLabelBinarizer() # TODO: don't use multilabel
-    label_encoder.fit(train_labels) #
-    train_Y = label_encoder.transform(train_labels)
-    train_Y = pad_sequences(train_Y, maxlen=512) # TODO: replace with cropping, apply to_categorical
+#    num_lines = max([len(i) for i in train_texts])
+#    label_encoder = LabelBinarizer() # TODO: don't use multilabel
+#    label_encoder.fit(train_labels) #
+#    train_Y = label_encoder.transform(train_labels)
+    labels = {'0':0, '1':1}
+    train_Y = []
+    for text in train_labels:
+        lines = []
+        for label in text:
+            lines.append(labels[label])
+        train_Y.append(lines)
+    print("y before padding",np.shape(train_Y))
+    train_Y = np.array(train_Y)
+    train_Y = to_categorical(pad_sequences(train_Y, maxlen=MAX_LINES, padding='post'), num_classes=2, dtype='int') # TODO: replace with cropping, apply to_categorical
     print("train_Y shape", np.shape(train_Y))
-    dev_Y = label_encoder.transform(dev_labels)
-    dev_Y = pad_sequences(dev_Y, maxlen=512)
+#    dev_Y = label_encoder.transform(dev_labels)
+    dev_Y = []
+    for text in dev_labels:
+        lines = []
+        for label in text:
+            lines.append(labels[label])
+        dev_Y.append(lines)
+    dev_Y = np.array(dev_Y)
+    dev_Y = to_categorical(pad_sequences(dev_Y, maxlen=MAX_LINES, padding='post'),num_classes=2, dtype='int')
     if options.test is not None:
-        test_Y = label_encoder.transform(test_labels)
-        test_Y = pad_sequences(test_Y, maxlen=512)
-    num_labels = len(label_encoder.classes_)
+#        test_Y = label_encoder.transform(test_labels)
+        test_Y = []
+        for text in test_labels:
+            lines = []
+            for label in text:
+                lines.append(labels[label])
+            test_Y.append(lines)
+        test_Y = np.array(test_Y)
+
+        test_Y = to_categorical(pad_sequences(test_Y, maxlen=MAX_LINES, padding='post'),num_classes=2, dtype='int')
+#    num_labels = len(label_encoder.classes_)
+    num_labels = len(labels)
  #   print(num_labels)
     classifier, tokenizer, optimizer = prepare_classifier(
         num_train_examples,
