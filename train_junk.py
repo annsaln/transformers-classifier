@@ -148,7 +148,7 @@ def build_classifier(pretrained_model, num_labels, optimizer, options, MAX_LINES
     pooled_output_ = Reshape((-1,768))(pooled_output)
     ## End of transformer block
 
-    encoded_lines = TimeDistributed(pooled_output)(doc_input)
+    encoded_lines = TimeDistributed(pooled_output_)(doc_input)
     # encoded_lines shape (hopefully): [n_docs, n_lines, emb_dim]
     lstm = LSTM(768)(encoded_lines, return_sequences=True)
     output = TimeDistributed(Dense(2, activation='softmax'))(lstm)
