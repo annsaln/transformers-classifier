@@ -14,7 +14,7 @@ from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import LabelBinarizer
 from tensorflow.keras import Model
-from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed, Reshape
+from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed, Layer
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy, AUC
@@ -130,6 +130,14 @@ def get_optimizer(num_train_examples, options):
     return optimizer
 
 
+class Identity(Layer):
+    def __init__(self):
+        super(Identity, self).__init__()
+
+    def call(self, inputs):
+        return inputs
+
+
 def build_classifier(pretrained_model, num_labels, optimizer, options, MAX_LINES=500):
     seq_len = options.seq_len
     # Document-level input
@@ -146,10 +154,14 @@ def build_classifier(pretrained_model, num_labels, optimizer, options, MAX_LINES
     pretrained_outputs = pretrained_model(inputs)
     pooled_output = pretrained_outputs['last_hidden_state'][:,0,:] #CLS
     #import pdb; pdb.set_trace()
-    pooled_output_ = Reshape((-1,768))(pooled_output)
+    pretrained_layer = Identity()(pretrained_outputs)
+    #pooled_output_ = Add()([pooled_output, np.zeros((1,pooled_output.shape[1]), dtype='float64')])
+    #pooled_output_ = Lambda(lambda x:x)(pooled_output)
     ## End of transformer block
 
-    encoded_lines = TimeDistributed(pooled_output_)(doc_input)
+    encoded_lines = TimeDistributed(pretrained_layer)
+    #encoded_lines = TimeDistributed(pooled_output)
+    encoded_lines = encoded_lines(doc_input)
     # encoded_lines shape (hopefully): [n_docs, n_lines, emb_dim]
     lstm = LSTM(768)(encoded_lines, return_sequences=True)
     output = TimeDistributed(Dense(2, activation='softmax'))(lstm)
