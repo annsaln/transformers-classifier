@@ -14,7 +14,7 @@ from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import LabelBinarizer
 from tensorflow.keras import Model
-from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed, Layer
+from tensorflow.keras.layers import Input, Dropout, Dense, TimeDistributed, Layer, LSTM
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy, AUC
@@ -80,6 +80,7 @@ def argparser():
                     help='input file format')
     ap.add_argument('--multiclass', default=False, action='store_true',
                     help='task has exactly one label per text')
+    ap.add_argument('--treshold', metavar='FLOAT', type=float, default=0.4)
     ap.add_argument('--output_file', default=None, metavar='FILE',
                     help='save model to file')
     ap.add_argument('--save_predictions', default=False, action='store_true',
@@ -158,24 +159,25 @@ def build_classifier(pretrained_model, num_labels, optimizer, options, MAX_LINES
     #pooled_output_ = Add()([pooled_output, np.zeros((1,pooled_output.shape[1]), dtype='float64')])
     #pooled_output_ = Lambda(lambda x:x)(pooled_output)
     ## End of transformer block
-
+    
     encoded_lines = TimeDistributed(pretrained_layer)
     #encoded_lines = TimeDistributed(pooled_output)
     encoded_lines = encoded_lines(doc_input)
     # encoded_lines shape (hopefully): [n_docs, n_lines, emb_dim]
-    lstm = LSTM(768)(encoded_lines, return_sequences=True)
-    output = TimeDistributed(Dense(2, activation='softmax'))(lstm)
+    #lstm = LSTM(768)(pretrained_layer, return_sequences=True)
+#    output = TimeDistributed(Dense(2, activation='softmax'))(lstm) 
+    output = TimeDistributed(Dense(2, activation='softmax'))(encoded_lines)
     loss = CategoricalCrossentropy()
-    F1Score(name='f1', num_classes=num_labels, average='micro')
-    """
+    metrics = F1Score(name='f1', num_classes=num_labels, average='micro')
+    
+    '''
     # TODO consider Dropout here
     if options.multiclass:
         output = Dense(num_labels, activation='softmax')(pooled_output)
         loss = CategoricalCrossentropy()
         metrics = [CategoricalAccuracy(name='acc')]
     else:
-        denselayer = Dense(seq_len, activation='softmax') #Anna muokkasi tästä
-        output = TimeDistributed(denselayer)(inputs)
+        output = Dense(num_labels, activation='sigmoid')(pooled_output)
         loss = BinaryCrossentropy()
         metrics = [
             #F1Score(name='f1_th0.3', num_classes=num_labels, average='micro', threshold=0.3),
@@ -183,13 +185,14 @@ def build_classifier(pretrained_model, num_labels, optimizer, options, MAX_LINES
             #F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5),
             #AUC(name='auc', multi_label=True)
         ]
-    """
+    '''
     #output = pretrained_outputs # test
+    
     model = Model(
         inputs=inputs,
         outputs=[output]
     )
-#    model.summary()
+    model.summary()
     model.compile(
         optimizer=optimizer,
         loss=loss,
@@ -266,9 +269,8 @@ class DataGenerator(Sequence):
 
 def make_tokenization_function(tokenizer, options):
     seq_len = options.seq_len
-    @timed
-    def tokenize(text, lines):
-        lines = lines
+#    @timed
+    def tokenize(text):
         tokenized = tokenizer(
             text,
             max_length=seq_len,
@@ -277,14 +279,14 @@ def make_tokenization_function(tokenizer, options):
             return_tensors='np'
         )
 #        print("padded length",len(pad_sequences(tokenized['input_ids'], maxlen=seq_len)))
-        input_ids = pad_sequences(tokenized['input_ids'], maxlen=seq_len)
+#        input_ids = pad_sequences(tokenized['input_ids'], maxlen=seq_len)
 #        print('orkkis')
 #        print(input_ids[0])
 #        print(input_ids)
-        attention_mask = pad_sequences(tokenized['attention_mask'], maxlen=seq_len)
+#        attention_mask = pad_sequences(tokenized['attention_mask'], maxlen=seq_len)
 #        print(attention_mask)
-        input_ids = np.pad(input_ids, ((0,lines-len(input_ids)), (0,0)), 'constant', constant_values=1)
-        attention_mask = np.pad(attention_mask, ((0,lines-len(attention_mask)),(0,0)))
+#        input_ids = np.pad(input_ids, ((0,lines-len(input_ids)), (0,0)), 'constant', constant_values=1)
+#        attention_mask = np.pad(attention_mask, ((0,lines-len(attention_mask)),(0,0)))
 
 #        print('uusi')
 #        print(input_ids)
@@ -295,11 +297,11 @@ def make_tokenization_function(tokenizer, options):
         # dict mapping to transformer.BatchEncoding inputs
 #        return input_ids, attention_mask
         return {
-#            'input_ids': pad_sequences(tokenized['input_ids'], maxlen=seq_len),
-            'input_ids': pad_sequences(input_ids, maxlen=seq_len),
+            'input_ids': tokenized['input_ids'],
+#            'input_ids': pad_sequences(input_ids, maxlen=seq_len),
 #            'token_type_ids': np.pad(tokenized['token_type_ids'], ((0,seq_len-len(attention_mask)),(0,0))),
-#            'attention_mask': pad_sequences(tokenized['attention_mask'], maxlen=seq_len),
-            'attention_mask': pad_sequences(attention_mask, maxlen=seq_len)
+            'attention_mask': tokenized['attention_mask']
+#            'attention_mask': pad_sequences(attention_mask, maxlen=seq_len)
         }# palauttaa dictin, jossa 2 avainta, joilla arvoina listat
 #        return pad_sequences(dict, maxlen=seq_len)
     return tokenize
@@ -492,12 +494,12 @@ def main(argv):
 #    train_X = tokenize(train_texts, 512)
 #    print(np.shape(train_X))
 #    dev_X = tokenize(dev_texts)
-    train_X = {'input_ids': [], 'attention_mask': [] # TODO: mode input_ids/attention_mask dict inside data structure
+#    train_X = {'input_ids': [], 'attention_mask': [] # TODO: mode input_ids/attention_mask dict inside data structure
               # ,'token_type_ids': []
-    }
-    dev_X = {'input_ids': [], 'attention_mask': []
+#    }
+#    dev_X = {'input_ids': [], 'attention_mask': []
              #, 'token_type_ids': []
-    }
+#    }
     input_ids = []
     attention_mask = []
     for train_doc in train_texts:
@@ -507,41 +509,79 @@ def main(argv):
         for i, line in enumerate(train_doc):
             if i >= MAX_LINES:
                 break
-            input = tokenize(line, options.seq_len)
-            input_ids[-1].append(input['token_ids'])
-            attention_mask[-1].append(input['attention_mask'])
+            input = tokenize(line)
+            input_ids[-1].extend(input['input_ids'])
+            attention_mask[-1].extend(input['attention_mask'])
 
         # Pad lines
-        for i in range(MAX_LINES-len(input_ids)):
-            input_ids[-1].append(input['token_ids']*0)
-            attention_mask[-1].append(input['attention_mask']*0)
-
+        for i in range(MAX_LINES-len(input_ids[-1])):
+            input_ids[-1].extend(input['input_ids']*0)
+            attention_mask[-1].extend(input['attention_mask']*0)
+    print(np.shape(input_ids))
     train_X = {'input_ids': np.array(input_ids), 'attention_mask': np.array(attention_mask)}
     #    train_X['input_ids'].append(
     #['input_ids'])
     #  train_X['token_type_ids'].append(tokenize(train, num_lines)['token_type_ids'])
     #    train_X['attention_mask'].append(tokenize(train, num_lines)['attention_mask'])
     print('input_ids shape', np.shape(train_X['input_ids']))
+    print('input_ids[0] shape', np.shape(train_X['input_ids'][0]))
+    print(train_X['input_ids'][0])
+#    print(train_X[:5])
+    input_ids = []
+    attention_mask = []
     for dev in dev_texts:
-        dev_X['input_ids'].append(tokenize(dev, num_lines)['input_ids'])
+#        dev_X['input_ids'].append(tokenize(dev, num_lines)['input_ids'])
      #   dev_X['token_type_ids'].append(tokenize(dev, num_lines)['token_type_ids'])
-        dev_X['attention_mask'].append(tokenize(dev, num_lines)['attention_mask'])
-    train_X['input_ids'] = np.asarray(train_X['input_ids'])
-    train_X['attention_mask'] = np.asarray(train_X['attention_mask'])
-    dev_X['input_ids'] = np.asarray(dev_X['input_ids']).astype('float32')
-    dev_X['attention_mask'] = np.asarray(dev_X['attention_mask']).astype('float32')
+#        dev_X['attention_mask'].append(tokenize(dev, num_lines)['attention_mask'])
+        input_ids.append([])
+        attention_mask.append([])
+        MAX_LINES = 500
+        for i, line in enumerate(train_doc):
+            if i >= MAX_LINES:
+                break
+            input = tokenize(line)
+            input_ids[-1].append(input['input_ids'])
+            attention_mask[-1].append(input['attention_mask'])
 
-    #print("TRAIN SHAPE:", np.shape(train_X))
+        # Pad lines
+        for i in range(MAX_LINES-len(input_ids[-1])):
+            input_ids[-1].append(input['input_ids']*0)
+            attention_mask[-1].append(input['attention_mask']*0)
+    dev_X = {'input_ids': np.array(input_ids,dtype=np.float), 'attention_mask': np.array(attention_mask,dtype=np.float)}
+
+#    print("TRAIN SHAPE:", np.shape(train_X))
     #print(train_X)
     #train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
     #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
 
     if options.test is not None:
-        test_X = {'input_ids':[],'attention_mask':[]}
+        input_ids = []
+        attention_mask = []
         for test in test_texts:
-            test_X['input_ids'].append(tokenize(test, num_lines)['input_ids'])
+#        dev_X['input_ids'].append(tokenize(dev, num_lines)['input_ids'])
+     #   dev_X['token_type_ids'].append(tokenize(dev, num_lines)['token_type_ids'])
+#        dev_X['attention_mask'].append(tokenize(dev, num_lines)['attention_mask'])
+            input_ids.append([])
+            attention_mask.append([])
+            MAX_LINES = 500
+            for i, line in enumerate(train_doc):
+                if i >= MAX_LINES:
+                    break
+                input = tokenize(line)
+                input_ids[-1].append(input['input_ids'])
+                attention_mask[-1].append(input['attention_mask'])
+
+            # Pad lines
+            for i in range(MAX_LINES-len(input_ids[-1])):
+                input_ids[-1].append(input['input_ids']*0)
+                attention_mask[-1].append(input['attention_mask']*0)
+        test_X = {'input_ids': np.array(input_ids,dtype=np.float), 'attention_mask': np.array(attention_mask,dtype=np.float)}
+
+#        test_X = {'input_ids':[],'attention_mask':[]}
+#        for test in test_texts:
+#            test_X['input_ids'].append(tokenize(test, num_lines)['input_ids'])
     #        test_X['token_type_ids'].append(tokenize(test, num_lines)['token_type_ids'])
-            test_X['attention_mask'].append(tokenize(test, num_lines)['attention_mask'])
+#            test_X['attention_mask'].append(tokenize(test, num_lines)['attention_mask'])
 
     if options.load_model is not None:
         classifier.load_weights(options.load_model)
