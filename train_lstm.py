@@ -8,15 +8,15 @@ import csv
 import json
 
 from scipy.sparse import lil_matrix
-
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
+from sklearn.utils import shuffle
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, f1_score, recall_score, precision_score, accuracy_score
 from sklearn.preprocessing import MultiLabelBinarizer, LabelEncoder
 
 from tensorflow.keras import Model
-from tensorflow.keras.layers import Input, Dropout, Dense, Layer, LSTM
+from tensorflow.keras.layers import Input, Dropout, Dense, Layer, LSTM, TimeDistributed, Bidirectional
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
-from tensorflow.keras.metrics import CategoricalAccuracy, AUC
+from tensorflow.keras.metrics import CategoricalAccuracy, AUC, Accuracy
 from tensorflow.keras.callbacks import Callback, ModelCheckpoint, EarlyStopping
 from tensorflow.keras.utils import Sequence, to_categorical
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -39,7 +39,7 @@ DEFAULT_BATCH_SIZE = 8
 DEFAULT_SEQ_LEN = 512
 DEFAULT_LR = 5e-5
 DEFAULT_WARMUP_PROPORTION = 0.1
-DEFAULT_MAX_LINES = 100
+DEFAULT_MAX_LINES = 500
 
 def init_tf_memory():
     gpus = tfconf_exp.list_physical_devices('GPU')
@@ -134,12 +134,9 @@ def get_optimizer(num_train_examples, options):
     )
     return optimizer
 
-
-def build_classifier(pretrained_model, num_labels, optimizer, options, num_train_examples, train_doc_ids):
+# TO DO: two separate build functions
+def build_transformer(pretrained_model, num_labels, optimizer, options, embedding_output):
     seq_len = options.seq_len
-    MAX_LINES = options.max_lines
-    train_doc_ids = train_doc_ids
-#    loaded_model = options.load_model
     input_ids = Input(
         shape=(seq_len,), dtype='int32', name='input_ids')
 #    token_type_ids = Input(
@@ -150,18 +147,14 @@ def build_classifier(pretrained_model, num_labels, optimizer, options, num_train
     inputs = [input_ids, attention_mask]
 
     pretrained_outputs = pretrained_model(inputs)
-    #pooled_output = pretrained_outputs[1]        
-#    pooled_output = pretrained_outputs['last_hidden_state'][:,0,:] #CLS
-    transformer_output = pretrained_outputs['last_hidden_state'][:,0,:] #CLS
-#    transformer_output = Dense(num_labels, activation='softmax')(pooled_output)
-    print("TRANSFORMER OUTPUT SHAPE", np.shape(transformer_output))
+    #pooled_output = pretrained_outputs[1]
+    pooled_output = pretrained_outputs['last_hidden_state'][:,0,:] #CLS
 
-    '''
     # TODO consider Dropout here
-    if options.multiclass:
-        output = Dense(num_labels, activation='softmax')(pooled_output)
-        loss = CategoricalCrossentropy()
-        metrics = [CategoricalAccuracy(name='acc')]
+    if embedding_output:
+        output = pooled_output
+        loss = BinaryCrossentropy()
+        metrics = [F1Score(name='f1_th0.4', num_classes=num_labels, average='micro', threshold=0.4)]
     else:
         output = Dense(num_labels, activation='sigmoid')(pooled_output)
         loss = BinaryCrossentropy()
@@ -172,46 +165,50 @@ def build_classifier(pretrained_model, num_labels, optimizer, options, num_train
             #AUC(name='auc', multi_label=True)
         ]
     #output = pretrained_outputs # test
-    '''
-    last_doc_ID = 0
-    lstm_input_data = np.zeros((num_train_examples, MAX_LINES, 768))
-    print("LSTM INPUT SHAPE", np.shape(lstm_input_data))
-    current_doc_idx = 0
-    current_line_idx = 0
-    for line_idx in range(8280): # fixed dimension, to be updated
-        if train_doc_ids[line_idx] == last_doc_ID:
-            if current_line_idx >= MAX_LINES:
-                break
-            lstm_input_data[current_doc_idx,:current_line_idx] = transformer_output[line_idx]
-            current_line_idx += 1
-            # check that current_line_idx < MAX_LINES
-            # insert transformer_output[line_idx] into lstm_input_data[current_doc_idx, current_line_idx]
-        else:
-            current_line_idx = 0
-            current_doc_idx += 1
-            last_doc_ID = doc_IDs[line_idx]
-            lstm_input_data[current_doc_idx,:current_line_idx] = transformer_output[line_idx]
-#            np.append(lstm_input_data[current_doc_idx, current_line_idx],inputs[line_idx])
-            # then insert as above
-    
-    lstm = LSTM(768)(lstm_input_data)
-    output = Dense(2, activation='softmax')(lstm)
-    loss = BinaryCrossentropy()
-    metrics = [
-        F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5)
-        ]
-    
     model = Model(
         inputs=inputs,
-        outputs=output
+        outputs=[output]
     )
-    
+
     model.compile(
         optimizer=optimizer,
         loss=loss,
         metrics=metrics
     )
-    
+
+    return model
+
+
+
+
+def build_lstm(pretrained_model, num_labels, optimizer, options):
+    seq_len = options.seq_len
+    MAX_LINES = options.max_lines
+#    train_doc_ids = train_doc_ids
+
+#    inputs = Input(shape=(180*100, 1024)
+#    lstm_input = Reshape(180,100,1024)(inputs)
+    inputs = Input(shape=(MAX_LINES, 768)) #1024 for roberta-large
+    lstm = Bidirectional(LSTM(768, return_sequences=True))(inputs)
+    output = TimeDistributed(Dense(3, activation='softmax'))(lstm) # output should be (None, 2) -> how to achieve this? + use sigmoid? timedistributed?
+
+#    output = Dense(3, activation='softmax')(lstm)
+#    loss = BinaryCrossentropy()
+    loss = CategoricalCrossentropy()
+    metrics = [
+#        F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5)
+        CategoricalAccuracy(name='categorical_accuracy', dtype=None)
+        ]
+    model = Model(
+        inputs=inputs,
+        outputs=output
+    )
+
+    model.compile(
+        optimizer=optimizer,
+        loss=loss,
+        metrics=metrics
+    )
     return model
 
 
@@ -232,6 +229,7 @@ def load_data(fn, options, max_chars=None):
             labels.append(text_labels)
     print(f'loaded {len(texts)} examples from {fn}', file=sys.stderr)
     return texts, labels
+
 
 
 class DataGenerator(Sequence):
@@ -294,6 +292,28 @@ def make_tokenization_function(tokenizer, options):
             'attention_mask': tokenized['attention_mask'],
         }
     return tokenize
+    
+def wrangle_data(transformer_output, doc_ids, options):
+    MAX_LINES = options.max_lines
+    last_doc_ID = 0
+    lstm_input_data = np.zeros((doc_ids[-1]+1, MAX_LINES, 768))
+    current_doc_idx = 0
+    current_line_idx = 0
+    for line_idx in range(transformer_output.shape[0]):
+        if doc_ids[line_idx] == last_doc_ID:
+            if current_line_idx >= MAX_LINES:
+                break
+            lstm_input_data[current_doc_idx, current_line_idx] = transformer_output[line_idx]
+            current_line_idx += 1
+            # check that current_line_idx < MAX_LINES
+            # insert transformer_output[line_idx] into lstm_input_data[current_doc_idx, current_line_idx]
+        else:
+            current_line_idx = 0
+            current_doc_idx += 1
+            last_doc_ID = doc_ids[line_idx]
+            lstm_input_data[current_doc_idx, current_line_idx] = transformer_output[line_idx]
+            # then insert as above
+    return lstm_input_data
 
 
 @timed
@@ -438,6 +458,77 @@ class EvalCallback(Callback):
             print("AUC test:", auc)
             self.test_logger.record(epoch, {'f1': test_f1, 'rocauc': auc})
 
+class EvaluateDocs(Callback):
+    def __init__(self, model, train_X, train_Y, dev_X, dev_Y, dev_labels, test_X=None, test_Y=None, test_labels=None, logfile="train.log", test_logfile=None, save_pred_to=None, params={}\
+):
+        self.model = model
+        self.train_X = train_X
+        self.train_Y = train_Y
+        self.dev_X = dev_X
+        self.dev_Y = dev_Y
+        self.test_X = test_X
+        self.test_Y = test_Y
+        self.test_labels = test_labels
+        self.dev_labels = dev_labels
+        self.logger = Logger(logfile, self.model, params)
+        if test_logfile is not None:
+            print("Setting up test set logging to", test_logfile, flush=True)
+            self.test_logger = Logger(test_logfile, self.model, params)
+        if save_pred_to is not None:
+            self.save_pred_to = save_pred_to
+        else:
+            self.save_pred_to = None
+
+    def on_epoch_end(self, epoch, logs={}):
+#        self.losses.append(logs.get('loss'))
+        preds = self.model.predict(self.dev_X)
+#        print('preds shape', np.shape(preds))
+        f1s = []
+        for i, doc in enumerate(self.dev_labels):
+            if len(doc) < 200:
+                dev_Y = np.argmax(self.dev_Y[i],axis=-1)[:len(doc)]
+            else:
+                dev_Y = np.argmax(self.dev_Y[i],axis=-1)
+            pred_Y = np.argmax(preds[i], axis = -1)
+            pred_Y = pred_Y[:len(dev_Y)]
+            test_acc = accuracy_score(dev_Y, pred_Y)
+            f1s.append(test_acc)
+#            tn, fp, fn, tp = confusion_matrix(dev_Y, pred).ravel()
+#            test_precision, test_recall, test_f1, _ = precision_recall_fscore_support(np.argmax(self.dev_Y[i], axis = 1), np.argmax(pred, axis=1), average=None)
+#            print("\nPrec. %.4f, Recall %.4f, F1 %.4f" % (test_precision, test_recall, test_f1))
+#            f1s.append(test_f1)
+        logs['accuracy'] = np.average(f1s)
+#        logs['f1'], _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.dev_X, self.dev_Y, epoch=epoch)
+#        logs['rocauc'] = test_auc(self.model, self.dev_X, self.dev_Y)
+#        print("AUC dev:", logs['rocauc'])
+
+        self.logger.record(epoch, logs)
+        
+        if self.test_X is not None:
+            testf1s = []
+            testpreds = self.model.predict(self.test_X)
+            print("Test set performance:")
+            for i, doc in enumerate(self.test_labels):            
+#                test_precision, test_recall, test_f1, _ = precision_recall_fscore_support(np.argmax(self.test_Y[i], axis = 1), np.argmax(pred, axis=1), average=None)
+#                testf1s.append(test_f1)
+                if len(doc) < 200:
+                    test_Y = np.argmax(self.test_Y[i],axis=-1)[:len(doc)]
+                else:
+                    test_Y = np.argmax(self.test_Y[i],axis=-1)
+                pred_Y = np.argmax(testpreds[i], axis = -1)
+                pred_Y = pred_Y[:len(test_Y)]
+                test_acc = accuracy_score(test_Y, pred_Y)
+                f1s.append(test_acc)
+            
+            '''
+            test_f1, _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch, save_pred_to=self.save_pred_to\
+)
+            auc = test_auc(self.model, self.test_X, self.test_Y)
+            print("AUC test:", auc)
+            '''
+            self.test_logger.record(epoch, {'accuracy': np.average(testf1s)})
+                
+        return
 
 def main(argv):
     init_tf_memory()
@@ -448,7 +539,7 @@ def main(argv):
     dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
     if options.test is not None:
         test_texts, test_labels = load_data(options.test, options, max_chars=25000)
-#    num_train_examples = len(train_texts)
+    num_train_texts = len(train_texts)
 
 
     '''
@@ -470,53 +561,59 @@ def main(argv):
     '''
     num_labels = 2
     labels = {'0':0, '1':1}
-    train_Y = []
+    xmlr_train_Y = []
     lstm_train_Y = []
     for text in train_labels:
         lines = []
         for label in text:
-            train_Y.append(labels[label])
+            xmlr_train_Y.append(labels[label])
             lines.append(labels[label])
         lstm_train_Y.append(lines)
     #print("y before padding",np.shape(train_Y))
     lstm_train_Y = np.array(lstm_train_Y)
-    lstm_train_Y = to_categorical(pad_sequences(lstm_train_Y, maxlen=MAX_LINES, padding='post'), num_classes=2, dtype='int') # TODO: replace with cropping, apply to_categorical
+    lstm_train_Y = to_categorical(pad_sequences(lstm_train_Y, maxlen=MAX_LINES, padding='post', truncating='post', value=2), num_classes=3, dtype='int') # TODO: replace with cropping, apply to_categorical
+#    lstm_train_Y = to_categorical(lstm_train_Y, num_classes=2, dtype='int')
+#    lstm_train_Y = lstm_train_Y.reshape(lstm_train_Y.shape[0]*lstm_train_Y.shape[1],lstm_train_Y.shape[2])
     label_encoder = LabelEncoder()
-    label_encoder.fit(train_Y)
+    label_encoder.fit(xmlr_train_Y)
     print("LSTM Y SHAPE", np.shape(lstm_train_Y))
 #    train_Y = label_encoder.transform(train_labels)
-    print("Y SHAPE:", np.shape(train_Y))
-    train_Y = label_encoder.transform(train_Y)
-    train_Y = to_categorical(train_Y)
+    print("Y SHAPE:", np.shape(xmlr_train_Y))
+    xmlr_train_Y = label_encoder.transform(xmlr_train_Y)
+    xmlr_train_Y = to_categorical(xmlr_train_Y)
 #    print("train_Y shape", np.shape(train_Y))
 #    dev_Y = label_encoder.transform(dev_labels)
-    dev_Y = []
+    xmlr_dev_Y = []
     lstm_dev_Y = []
     for text in dev_labels:
         lines = []
         for label in text:
-            dev_Y.append(labels[label])
+            xmlr_dev_Y.append(labels[label])
             lines.append(labels[label])
         lstm_dev_Y.append(lines)
     lstm_dev_Y = np.array(lstm_dev_Y)
-    lstm_dev_Y = to_categorical(pad_sequences(lstm_dev_Y, maxlen=MAX_LINES, padding='post'),num_classes=2, dtype='int')
-    dev_Y = label_encoder.transform(dev_Y)
-    dev_Y = to_categorical(dev_Y)
+    lstm_dev_Y = pad_sequences(lstm_dev_Y, maxlen=MAX_LINES, padding='post', truncating='post', value=2)
+#    lstm_dev_Y = lstm_dev_Y.reshape(lstm_dev_Y.shape[0]*lstm_dev_Y.shape[1],lstm_dev_Y.shape[2])
+    lstm_dev_Y = to_categorical(lstm_dev_Y, num_classes=3, dtype='int')
+    xmlr_dev_Y = label_encoder.transform(xmlr_dev_Y)
+    xmlr_dev_Y = to_categorical(xmlr_dev_Y)
     if options.test is not None:
 #        test_Y = label_encoder.transform(test_labels)
-        test_Y = []
+        xmlr_test_Y = []
         lstm_test_Y = []
         for text in test_labels:
             lines = []
             for label in text:
-                test_Y.append(labels[label])
+                xmlr_test_Y.append(labels[label])
                 lines.append(labels[label])
             lstm_test_Y.append(lines)
         lstm_test_Y = np.array(lstm_test_Y)
-        lstm_test_Y = to_categorical(pad_sequences(lstm_test_Y, maxlen=MAX_LINES, padding='post'),num_classes=2, dtype='int')
-        test_Y = label_encoder.transform(test_Y)
-        test_Y = to_categorical(test_Y)
-    num_train_examples = len(lstm_train_Y)
+        lstm_test_Y = to_categorical(pad_sequences(lstm_test_Y, maxlen=MAX_LINES, padding='post', truncating='post', value=2),num_classes=3, dtype='int')
+        xmlr_test_Y = label_encoder.transform(xmlr_test_Y)
+        xmlr_test_Y = to_categorical(xmlr_test_Y)
+
+    xmlr_num_train_examples = len(xmlr_train_Y)
+    lstm_num_train_examples = len(lstm_train_Y)
 #    classifier, tokenizer, optimizer = prepare_classifier(
 #        num_train_examples,
 #        num_labels,
@@ -543,122 +640,68 @@ def main(argv):
                 for line in doc:
                     test_X.append(line)
                     test_doc_ids.append(i)
-    
+    '''
     classifier, tokenizer, optimizer = prepare_classifier(
         num_train_examples,
         num_labels,
         options,
         train_doc_ids
     )
-    
-    classifier.load_weights(options.load_model)
+    '''
+    xmlr_optimizer = get_optimizer(xmlr_num_train_examples, options)
+    lstm_optimizer = get_optimizer(lstm_num_train_examples, options)
+    pretrained_model, tokenizer, config = load_pretrained(options)
+    xmlr_model = build_transformer(pretrained_model, num_labels, xmlr_optimizer, options, embedding_output=False)
+    if options.load_model is not None:
+        xmlr_model.load_weights(options.load_model)
+        xmlr_emb = build_transformer(pretrained_model, num_labels, xmlr_optimizer, options, embedding_output=True)
+        for i in range(len(xmlr_model.layers)-1):
+            xmlr_emb.layers[i].set_weights(xmlr_model.layers[i].get_weights())
+        lstm_model = build_lstm(pretrained_model, num_labels, lstm_optimizer, options)
+        classifier = lstm_model
+#        lstm_model.summary()
+    else:
+        classifier = xmlr_model
 
     tokenize = make_tokenization_function(tokenizer, options)
-    
+#    print("Before tokenization")
+#    print(train_texts[0])
     train_X = tokenize(train_X)
     dev_X = tokenize(dev_X)
+#    print("After tokenization")
+#    print(train_X)
+#    print(train_Y)
     #train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
     #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
     if options.test is not None:
         test_X = tokenize(test_X)
-    ''''
-    last_doc_ID = 0
-    lstm_input_data = np.zeros((num_train_examples, MAX_LINES, 768))
-    current_doc_idx = 0
-    for line_idx in range(transformer_output.shape[0]):
-        if train_doc_ids[line_idx] == last_doc_ID:
-            if current_line_idx >= MAX_LINES:
-                break
-            lstm_input_data[current_doc_idx, current_line_idx].append(transformer_output[line_idx])
-            current_line_idx += 1
-            # check that current_line_idx < MAX_LINES
-            # insert transformer_output[line_idx] into lstm_input_data[current_doc_idx, current_line_idx]
-        else:
-            current_line_idx = 0
-            current_doc_idx += 1
-            last_doc_ID = doc_IDs[line_idx]
-            lstm_input_data[current_doc_idx, current_line_idx].append(transformer_output[line_idx])
-            # then insert as above
-    '''
-    '''
-    input_ids = []
-    attention_mask = []
-    dev_doc_ids = []
     
-    for train_doc in train_texts:
-        input_ids.append([])
-        attention_mask.append([])
-        for i, line in enumerate(train_doc):
-            if i >= MAX_LINES:
-                break
-            input = tokenize(line)
-            input_ids[-1].extend(input['input_ids'])
-            attention_mask[-1].extend(input['attention_mask'])
+    if options.load_model is not None:
+        transformer_output_train = xmlr_emb.predict(train_X)
+        transformer_output_dev = xmlr_emb.predict(dev_X)
+        transformer_output_test = xmlr_emb.predict(test_X)
+        train_X = wrangle_data(transformer_output_train, train_doc_ids, options)
+        print('lstm train shape', train_X.shape)
+#    lstm_input_data_train = lstm_input_data_train.reshape(lstm_input_data_train.shape[0]*lstm_input_data_train.shape[1],lstm_input_data_train.shape[2])
+#    print('lstm train shape', lstm_input_data_train.shape)
 
-        # Pad lines
-        for i in range(MAX_LINES-len(input_ids[-1])):
-            input_ids[-1].extend(input['input_ids']*0)
-            attention_mask[-1].extend(input['attention_mask']*0)
-    print(np.shape(input_ids))
-    train_X = {'input_ids': np.array(input_ids), 'attention_mask': np.array(attention_mask)}
-    #    train_X['input_ids'].append(
-    #['input_ids'])
-    #  train_X['token_type_ids'].append(tokenize(train, num_lines)['token_type_ids'])
-    #    train_X['attention_mask'].append(tokenize(train, num_lines)['attention_mask'])
-    print('input_ids shape', np.shape(train_X['input_ids']))
-    print('input_ids[0] shape', np.shape(train_X['input_ids'][0]))
-    print(train_X['input_ids'][0])
-#    print(train_X[:5])
-    input_ids = []
-    attention_mask = []
-    for dev in dev_texts:
-#        dev_X['input_ids'].append(tokenize(dev, num_lines)['input_ids'])
-     #   dev_X['token_type_ids'].append(tokenize(dev, num_lines)['token_type_ids'])
-#        dev_X['attention_mask'].append(tokenize(dev, num_lines)['attention_mask'])
-        input_ids.append([])
-        attention_mask.append([])
-        MAX_LINES = 500
-        for i, line in enumerate(dev):
-            if i >= MAX_LINES:
-                break
-            input = tokenize(line)
-            input_ids[-1].append(input['input_ids'])
-            attention_mask[-1].append(input['attention_mask'])
-
-        # Pad lines
-        for i in range(MAX_LINES-len(input_ids[-1])):
-            input_ids[-1].append(input['input_ids']*0)
-            attention_mask[-1].append(input['attention_mask']*0)
-    dev_X = {'input_ids': np.array(input_ids,dtype=np.float), 'attention_mask': np.array(attention_mask,dtype=np.float)}
-
-#    print("TRAIN SHAPE:", np.shape(train_X))
-    #print(train_X)
-    #train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
-    #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
-
-    if options.test is not None:
-        input_ids = []
-        attention_mask = []
-        for test in test_texts:
-#        dev_X['input_ids'].append(tokenize(dev, num_lines)['input_ids'])
-     #   dev_X['token_type_ids'].append(tokenize(dev, num_lines)['token_type_ids'])
-#        dev_X['attention_mask'].append(tokenize(dev, num_lines)['attention_mask'])
-            input_ids.append([])
-            attention_mask.append([])
-            MAX_LINES = 500
-            for i, line in enumerate(test):
-                if i >= MAX_LINES:
-                    break
-                input = tokenize(line)
-                input_ids[-1].append(input['input_ids'])
-                attention_mask[-1].append(input['attention_mask'])
-
-            # Pad lines
-            for i in range(MAX_LINES-len(input_ids[-1])):
-                input_ids[-1].append(input['input_ids']*0)
-                attention_mask[-1].append(input['attention_mask']*0)
-        test_X = {'input_ids': np.array(input_ids,dtype=np.float), 'attention_mask': np.array(attention_mask,dtype=np.float)}
-    '''
+        dev_X = wrangle_data(transformer_output_dev, dev_doc_ids, options)
+        print('lstm dev shape', dev_X.shape)
+        test_X = wrangle_data(transformer_output_test, test_doc_ids, options)
+#        print('lstm test shape', lstm_input_data_test.shape)
+        train_Y = lstm_train_Y
+        dev_Y = lstm_dev_Y
+        test_Y = lstm_test_Y
+        print("lstm labels shape", np.shape(train_Y))
+    else:
+        train_Y = xmlr_train_Y
+        dev_Y = xmlr_dev_Y
+        test_Y = xmlr_test_Y
+#    print("Lstm input")
+#    print(train_X)
+#    print("LSTM INPUT DATA SHAPE", lstm_input_data_train.shape[0])
+#    lstm_model = build_lstm(pretrained_model, num_labels, optimizer, options)
+#    lstm_model.summary()
     
     '''
     if options.load_model is not None:
@@ -699,10 +742,25 @@ def main(argv):
                                     logfile=options.log_file,
                                     params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
     else:
-        print("Initializing early stopping criterion...")
-        callbacks.append(EarlyStopping(monitor="val_f1_th0.5", verbose=1, patience=5, mode="max", restore_best_weights=True))
-
-
+        
+        if options.test is not None and options.test_log_file is not None:
+            print("Initializing evaluation with dev and test set...")
+            callbacks.append(EvaluateDocs(classifier, train_X, train_Y, dev_X, dev_Y, test_X=test_X, test_Y=test_Y, dev_labels=dev_labels, test_labels=test_labels,
+                                    logfile=options.log_file,
+                                    test_logfile=options.test_log_file,
+                                    save_pred_to=options.output_file,
+                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
+        else:
+            print("Initializing evaluation with dev set...")
+            callbacks.append(EvaluateDocs(classifier, train_X, train_Y, dev_X, dev_Y,dev_labels=dev_labels,
+                                    logfile=options.log_file,
+                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
+        
+        #print("Initializing early stopping criterion...")
+#        callbacks.append(EarlyStopping(monitor='val_loss', verbose=1, patience=5, mode='min', restore_best_weights=True))
+#        callbacks.append(EarlyStopping(monitor='val_f1_th0.5', verbose=1, patience=5, mode="max", restore_best_weights=True))
+        callbacks.append(EarlyStopping(monitor='accuracy', verbose=1, patience=20, mode="max", restore_best_weights=True))
+    class_weight = {0:1, 1:1, 2:0}
     history = classifier.fit(
         train_X,
         train_Y,
@@ -721,10 +779,17 @@ def main(argv):
         callbacks=callbacks
     )"""
     
-    print("THIS IS AFTER TRANSFORMERS")
-    if options.threshold is not None:
+#    print("THIS IS AFTER LSTM")
+#    print("Evaluate on test data")
+#    results = classifier.evaluate(test_X, test_Y, batch_size=None) # experiment with batch size
+#    print("test loss, test acc:", results)
+
+#    print(lstm_model.predict(lstm_input_data_test))
+    if options.threshold is not None and options.load_model is None:
         if options.dev is not None:
-            f1, _, _, rocauc = test_threshold(classifier, dev_X, dev_Y, return_auc=True, threshold=options.threshold)
+            f1, _, _, rocauc = test_threshold(lstm_model, lstm_input_data_dev, lstm_dev_Y, return_auc=True, threshold=options.threshold)
+
+#            f1, _, _, rocauc = test_threshold(classifier, dev_X, dev_Y, return_auc=True, threshold=options.threshold)
             print("Restored best checkpoint, F1: %.6f, AUC: %.6f" % (f1, rocauc))
 
             logger = Logger(options.log_file, None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
@@ -750,7 +815,9 @@ def main(argv):
                 test_logger.record(epoch, {'f1': test_f1, 'rocauc': test_rocauc})
             '''
             print("Evaluating on test set...")
-            test_f1, test_th, test_pred = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, return_auc=True)
+            test_f1, test_th, test_pred = test_threshold(lstm_model, lstm_input_data_test, lstm_test_Y, return_auc=True, threshold=options.threshold)
+
+#            test_f1, test_th, test_pred = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, return_auc=True)
             print("AUC test:", test_rocauc)
             print("Logging to", test_log_file)
             test_logger = Logger(options.test_log_file.split(';')[i], None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
@@ -759,28 +826,51 @@ def main(argv):
             except:
                 epoch = -1
             test_logger.record(epoch, {'f1': test_f1, 'rocauc': test_rocauc})
+    else:
+        print("Evaluate on test data")
+        results = classifier.evaluate(test_X, test_Y)
+        print("Keras test loss, test acc:", results)
+    '''
+    id2label = {0: 'JUNK', '1': 'GOOD'}
+    y = [[id2label[idx] for idx in row[:l]] for row, l in test_Y]
 
+    print("seq eval f1 score:")
+    print(classification_report(test_Y, classifier.predict(test_X)))
+    '''
+    test_X, lstm_test_Y, test_texts = shuffle(test_X, lstm_test_Y, test_texts) 
+    preds = classifier.predict(test_X)
+    print("PREDS SHAPE", np.shape(preds))
+    f1s = []
+    for i, doc in enumerate(test_texts):
+#        print("test text", doc)
+#        print("TEST Y",lstm_test_Y[i])
+#        print("PRED", preds[i])
+        if len(doc) < MAX_LINES:
+            test_Y = np.argmax(lstm_test_Y[i],axis=-1)[:len(doc)]
+        else:
+            test_Y = np.argmax(lstm_test_Y[i],axis=-1)
+        pred_Y = np.argmax(preds[i], axis = -1)[:len(test_Y)]
+#        print("TEST shape",np.shape(test_Y),"PRED shape",np.shape(pred_Y))
+        #print("test y", test_Y)
+        #print("pred y", pred_Y)
+        test_acc = accuracy_score(test_Y, pred_Y)
+#        print("Accuracy", test_acc)
+ #        test_precision, test_recall, test_f1, _ = precision_recall_fscore_support(np.argmax(test_Y[i], axis = 1), np.argmax(preds[i], axis = 1), average="weighted")
+#        print("Prec. %.4f, Recall %.4f, F1 %.4f" % (test_precision, test_recall, test_f1))
+#        f1s.append(test_f1)
+        f1s.append(test_acc)
+    print("AVG OF ACCURACY",np.average(f1s))
+    for i, doc in enumerate(test_texts):
+        print("ACCURACY", f1s[i])
+        for l, line in enumerate(doc):
+            if l >= MAX_LINES:
+                break
+            print(np.argmax(preds[i][l]), np.argmax(lstm_test_Y[i][l], axis=-1), test_texts[i][l])
+        print()
+#    print(test_texts[0])
+#    print(test_labels[0])
 #    transformer_output = classifier.layers[-1]
 #    print(np.shape(transformer_output))
-    ''''
-    last_doc_ID = 0
-    lstm_input_data = np.zeros((num_train_examples, MAX_LINES, 768))
-    current_doc_idx = 0
-    for line_idx in range(transformer_output.shape[0]):
-        if train_doc_ids[line_idx] == last_doc_ID:
-            if current_line_idx >= MAX_LINES:
-                break
-            lstm_input_data[current_doc_idx, current_line_idx].append(transformer_output[line_idx])
-            current_line_idx += 1
-            # check that current_line_idx < MAX_LINES
-            # insert transformer_output[line_idx] into lstm_input_data[current_doc_idx, current_line_idx]
-        else:
-            current_line_idx = 0
-            current_doc_idx += 1
-            last_doc_ID = doc_IDs[line_idx]
-            lstm_input_data[current_doc_idx, current_line_idx].append(transformer_output[line_idx])
-            # then insert as above
-    '''
     '''
     try:
         if options.output_file:
